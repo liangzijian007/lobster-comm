@@ -37,8 +37,10 @@ const DEFAULT_CONFIG = {
   },
   polling: {
     interval_min: 10,
-    task_timeout_min: 30,
-    ack_timeout_min: 10
+    task_timeout_min: 30,         // 保留兼容，不参与超时判定
+    ack_timeout_min: 60,          // 等ACK超时（分钟），CMD发出后无ACK则EXPIRED
+    result_timeout_min: 120,      // 等RESULT超时（分钟），ACK后无RESULT则自动ERROR
+    discuss_timeout_min: 120      // 讨论回复超时（分钟），收到DISCUSS后无回复则轮次超时
   },
   interaction: {
     max_auto_reply_rounds: 3,
@@ -61,16 +63,16 @@ const DEFAULT_CONFIG = {
 
 // 默认状态
 const DEFAULT_STATE = {
-  pending_acks: [],           // 等待ACK的CMD列表 { task_id, to, sent_at, no_ack_count }
-  pending_results: [],        // 已收到ACK但等待RESULT的任务 { task_id, to, original_task_id, ack_at, no_result_count, description }
+  pending_acks: [],           // 等待ACK的CMD列表 { task_id, to, sent_at }
+  pending_results: [],        // 已收到ACK但等待RESULT的任务 { task_id, to, ack_at, description }
   processed_task_ids: [],     // 已处理的任务ID（最近100个）
   expired_task_ids: [],       // 被EXPIRED通知标记的过期任务ID（最近100个）
   offline_lobsters: {},       // 离线龙虾记录 { id: { since, failed_tasks } }
   known_lobsters: {},         // 已知龙虾记录 { id: { first_seen, last_active, role, status } }
   last_poll_time: null,       // 上次成功poll的ISO时间
   reply_chain_depth: {},      // 任务链回复深度追踪
-  my_acked_tasks: [],         // 我ACK了但还没发RESULT的任务 { task_id, from, action, description, ack_at, no_result_remind_count }
-  my_pending_discuss_replies: [], // 我需要回复但还没回复的讨论 { thread_id, round, from, topic, remind_count, created_at }
+  my_acked_tasks: [],         // 我ACK了但还没发RESULT的任务 { task_id, from, action, description, acked_at }
+  my_pending_discuss_replies: [], // 我需要回复但还没回复的讨论 { thread_id, round, from, topic, created_at }
   active_threads: {}          // 活跃讨论线程 { thread_id: { topic, initiator, participants, roles, current_round, max_rounds, timeout_min, replies: {round: {lobster_id: msg_body}}, started_at, last_active, concluded } }
 };
 
@@ -355,22 +357,6 @@ function removePendingAck(taskId) {
 }
 
 /**
- * 递增未收到ACK的轮询计数
- * @returns {number} 新的no_ack_count
- */
-function incrementNoAckCount(taskId) {
-  const state = getState();
-  const pending = state.pending_acks.find(p => p.task_id === taskId);
-  if (pending) {
-    pending.no_ack_count = (pending.no_ack_count || 0) + 1;
-    markDirty();
-    if (!_inMemoryState) saveState(state);
-    return pending.no_ack_count;
-  }
-  return -1;
-}
-
-/**
  * 获取所有待ACK记录
  */
 function getPendingAcks() {
@@ -411,23 +397,6 @@ function removePendingResult(taskId) {
 }
 
 /**
- * 递增未收到RESULT的轮询计数
- * @returns {number} 新的no_result_count
- */
-function incrementNoResultCount(taskId) {
-  const state = getState();
-  if (!state.pending_results) return -1;
-  const pending = state.pending_results.find(p => p.task_id === taskId);
-  if (pending) {
-    pending.no_result_count = (pending.no_result_count || 0) + 1;
-    markDirty();
-    if (!_inMemoryState) saveState(state);
-    return pending.no_result_count;
-  }
-  return -1;
-}
-
-/**
  * 获取所有待RESULT记录
  */
 function getPendingResults() {
@@ -456,8 +425,7 @@ function addMyAckedTask(taskId, from, action, description) {
     from: from,
     action: action || '',
     description: description || '',
-    ack_at: new Date().toISOString(),
-    no_result_remind_count: 0
+    acked_at: new Date().toISOString()
   });
   markDirty();
   if (!_inMemoryState) saveState(state);
@@ -473,24 +441,6 @@ function removeMyAckedTask(taskId) {
   state.my_acked_tasks = state.my_acked_tasks.filter(t => t.task_id !== taskId);
   markDirty();
   if (!_inMemoryState) saveState(state);
-}
-
-/**
- * 递增已ACK任务的提醒计数
- * @param {string} taskId - 原CMD的task_id
- * @returns {number} 新的no_result_remind_count
- */
-function incrementMyAckedRemindCount(taskId) {
-  const state = getState();
-  if (!state.my_acked_tasks) return -1;
-  const task = state.my_acked_tasks.find(t => t.task_id === taskId);
-  if (task) {
-    task.no_result_remind_count = (task.no_result_remind_count || 0) + 1;
-    markDirty();
-    if (!_inMemoryState) saveState(state);
-    return task.no_result_remind_count;
-  }
-  return -1;
 }
 
 /**
@@ -548,25 +498,6 @@ function removeMyPendingDiscussReply(threadId, round) {
   }
   markDirty();
   if (!_inMemoryState) saveState(state);
-}
-
-/**
- * 递增待回复讨论的提醒计数
- * @param {string} threadId - 讨论线程ID
- * @param {number} round - 轮次
- * @returns {number} 新的remind_count
- */
-function incrementMyDiscussRemindCount(threadId, round) {
-  const state = getState();
-  if (!state.my_pending_discuss_replies) return -1;
-  const item = state.my_pending_discuss_replies.find(d => d.thread_id === threadId && d.round === round);
-  if (item) {
-    item.remind_count = (item.remind_count || 0) + 1;
-    markDirty();
-    if (!_inMemoryState) saveState(state);
-    return item.remind_count;
-  }
-  return -1;
 }
 
 /**
@@ -995,19 +926,15 @@ module.exports = {
   commitBatch,
   addPendingAck,
   removePendingAck,
-  incrementNoAckCount,
   getPendingAcks,
   addPendingResult,
   removePendingResult,
-  incrementNoResultCount,
   getPendingResults,
   addMyAckedTask,
   removeMyAckedTask,
-  incrementMyAckedRemindCount,
   getMyAckedTasks,
   addMyPendingDiscussReply,
   removeMyPendingDiscussReply,
-  incrementMyDiscussRemindCount,
   getMyPendingDiscussReplies,
   addProcessedTaskId,
   isTaskProcessed,

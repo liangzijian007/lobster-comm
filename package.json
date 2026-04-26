@@ -1,6 +1,6 @@
 {
   "name": "lobster-comm",
-  "version": "1.0.0",
+  "version": "3.0.0",
   "description": "LobsterMail - OpenClaw跨平台通信协议，基于163共享邮箱实现龙虾间指令调度",
   "main": "scripts/lobster-comm.js",
   "scripts": {

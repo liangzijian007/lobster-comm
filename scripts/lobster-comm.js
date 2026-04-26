@@ -3,10 +3,8 @@
  * lobster-comm.js - 龙虾跨平台通信主入口
  * 
  * v3 改进:
- * - 去掉ACK超时重发CMD机制（邮件已在邮箱中，重发无意义）
- * - 轮询计数制：3次轮询无ACK→发EXPIRED→通知用户
- * - 收到ACK后转入pending_results，3次轮询无RESULT→通知用户超时
- * - 每次轮询无RESULT时发CMD询问进度
+ * - 超时判定与轮询间隔解耦：时间为主（ack_timeout_min/result_timeout_min/discuss_timeout_min），轮询计数降为兜底
+ * - 收到ACK后转入pending_results，超时未收RESULT→通知用户
  * - compact输出模式(--compact)省token
  * - poll输出精简(去掉uid，pending_acks只返回概要)
  * - 离线龙虾状态展示
@@ -812,7 +810,8 @@ async function cmdSend(args) {
     // 如果是CMD，记录待ACK
     if (msgType === 'CMD') {
       cfg.addPendingAck(taskId, to, body.description || '');
-      println(`   ⏱️  等待ACK确认（3次轮询无响应则判定离线，指令作废）`);
+      const ackTimeoutMin = appConfig.polling.ack_timeout_min || 60;
+      println(`   ⏱️  等待ACK确认（${ackTimeoutMin}分钟无响应则判定离线，指令作废）`);
     }
     
     // 如果是RESULT/ERROR，从my_acked_tasks中移除（Agent手动发送了RESULT/ERROR，不再需要自动超时）
@@ -1358,21 +1357,23 @@ async function cmdPoll(args) {
     }
   }
   
-  // ── 检查pending_acks：轮询计数制 ──
-  const MAX_NO_ACK_POLLS = 3;  // 3次轮询无ACK则判定离线
+  // ── 检查pending_acks：时间判定 ──
+  const ACK_TIMEOUT_MIN = appConfig.polling.ack_timeout_min || 60;  // 默认60分钟
   const currentPendingAcks = cfg.getPendingAcks();
   const acksToRemove = [];
   
   for (const pending of currentPendingAcks) {
-    const newCount = cfg.incrementNoAckCount(pending.task_id);
+    const elapsedMin = (Date.now() - new Date(pending.sent_at).getTime()) / 60000;
     
-    if (newCount >= MAX_NO_ACK_POLLS) {
-      // 3次轮询无ACK → 发EXPIRED → 判定离线
+    if (elapsedMin >= ACK_TIMEOUT_MIN) {
+      // 超时无ACK → 发EXPIRED → 判定离线
       pollNotifications.push({
         type: 'ACK_TIMEOUT',
         task_id: pending.task_id,
         to: pending.to,
-        message: `❌ 龙虾 ${pending.to} 连续${newCount}次轮询未响应ACK，判定离线，指令作废`
+        elapsed_min: Math.round(elapsedMin),
+        timeout_min: ACK_TIMEOUT_MIN,
+        message: `❌ 龙虾 ${pending.to} ${Math.round(elapsedMin)}分钟未响应ACK（超时${ACK_TIMEOUT_MIN}分钟），判定离线，指令作废`
       });
       
       // 标记离线
@@ -1387,9 +1388,10 @@ async function cmdPoll(args) {
         type: 'EXPIRED',
         priority: 'NORMAL',
         body: {
-          reason: 'no_ack_3_polls',
-          poll_count: newCount,
-          message: `连续${newCount}次轮询未响应ACK，任务已过时`
+          reason: 'ack_timeout',
+          elapsed_min: Math.round(elapsedMin),
+          timeout_min: ACK_TIMEOUT_MIN,
+          message: `${Math.round(elapsedMin)}分钟未响应ACK，任务已过时`
         },
         timeoutMin: appConfig.polling.task_timeout_min,
         replyToTaskId: pending.task_id,
@@ -1404,16 +1406,8 @@ async function cmdPoll(args) {
       }
       
       acksToRemove.push(pending.task_id);
-    } else {
-      // 还没到3次，只记录状态
-      pollNotifications.push({
-        type: 'ACK_WAITING',
-        task_id: pending.task_id,
-        to: pending.to,
-        poll_count: newCount,
-        message: `⏳ 等待 ${pending.to} 确认（第${newCount}次轮询，共${MAX_NO_ACK_POLLS}次）`
-      });
     }
+    // 未超时不发通知，用status命令查看
   }
   
   // 批量移除已超时的pending_acks
@@ -1421,50 +1415,27 @@ async function cmdPoll(args) {
     cfg.removePendingAck(taskId);
   }
   
-  // ── 检查pending_results：轮询计数制 ──
-  const MAX_NO_RESULT_POLLS = 3;  // 3次轮询无RESULT则判定超时
+  // ── 检查pending_results：时间判定 ──
+  const RESULT_TIMEOUT_MIN = appConfig.polling.result_timeout_min || 120;  // 默认120分钟
   const currentPendingResults = cfg.getPendingResults();
   const resultsToRemove = [];
   
   for (const pending of currentPendingResults) {
-    const newCount = cfg.incrementNoResultCount(pending.task_id);
+    const elapsedMin = (Date.now() - new Date(pending.ack_at).getTime()) / 60000;
     
-    if (newCount >= MAX_NO_RESULT_POLLS) {
-      // 3次轮询无RESULT → 通知用户超时
+    if (elapsedMin >= RESULT_TIMEOUT_MIN) {
+      // 超时无RESULT → 通知用户
       pollNotifications.push({
         type: 'RESULT_TIMEOUT',
         task_id: pending.task_id,
         to: pending.to,
-        message: `⚠️ 龙虾 ${pending.to} 已确认接收但连续${newCount}次轮询未交付结果，任务执行超时`
+        elapsed_min: Math.round(elapsedMin),
+        timeout_min: RESULT_TIMEOUT_MIN,
+        message: `⚠️ 龙虾 ${pending.to} 已确认接收但${Math.round(elapsedMin)}分钟未交付结果（超时${RESULT_TIMEOUT_MIN}分钟）`
       });
       resultsToRemove.push(pending.task_id);
-    } else {
-      // 还没到3次，发CMD询问进度
-      pollNotifications.push({
-        type: 'RESULT_WAITING',
-        task_id: pending.task_id,
-        to: pending.to,
-        poll_count: newCount,
-        message: `🔄 ${pending.to} 还在执行中（第${newCount}次轮询询问进度）`
-      });
-      
-      // 发送进度询问CMD
-      const myRole = appConfig.identity.work_mode === 'full' ? 'hub' : 'worker';
-      const progressBody = proto.buildBody({
-        from: appConfig.identity.id,
-        to: pending.to,
-        taskId: cfg.generateTaskId(appConfig.identity.id),
-        type: 'CMD',
-        priority: 'LOW',
-        body: { action: 'progress_query', original_task_id: pending.task_id },
-        timeoutMin: appConfig.polling.task_timeout_min,
-        retryCount: 0,
-        senderRole: myRole,
-        sharedSecret: appConfig.security.shared_secret
-      });
-      
-      await mail.sendLobsterMail(appConfig, progressBody);
     }
+    // 未超时不发通知，不询问进度，用status命令查看
   }
   
   // 批量移除已超时的pending_results
@@ -1472,23 +1443,25 @@ async function cmdPoll(args) {
     cfg.removePendingResult(taskId);
   }
   
-  // ── 检查my_acked_tasks：执行者侧强制RESULT机制 ──
-  // 我ACK了别人的CMD但还没发RESULT → 递增提醒计数 → 超时自动发ERROR RESULT
-  const MAX_MY_ACKED_REMINDS = 3;  // 3次轮询未发RESULT → 自动发ERROR RESULT关闭链路
+  // ── 检查my_acked_tasks：执行者侧时间判定 ──
+  // 我ACK了别人的CMD但还没发RESULT → 检查时间 → 超时自动发ERROR RESULT
+  const MY_ACKED_TIMEOUT_MIN = appConfig.polling.result_timeout_min || 120;  // 默认120分钟
   const myAckedTasks = cfg.getMyAckedTasks();
   const myAckedToRemove = [];
   
   for (const ackedTask of myAckedTasks) {
-    const remindCount = cfg.incrementMyAckedRemindCount(ackedTask.task_id);
+    const elapsedMin = (Date.now() - new Date(ackedTask.acked_at || ackedTask.ack_at).getTime()) / 60000;
     
-    if (remindCount >= MAX_MY_ACKED_REMINDS) {
-      // 3次轮询未发RESULT → 自动发ERROR RESULT关闭链路
+    if (elapsedMin >= MY_ACKED_TIMEOUT_MIN) {
+      // 超时未发RESULT → 自动发ERROR RESULT关闭链路
       pollNotifications.push({
         type: 'MY_ACKED_TIMEOUT',
         task_id: ackedTask.task_id,
         from: ackedTask.from,
         action: ackedTask.action,
-        message: `❌ 任务 ${ackedTask.task_id}（来自${ackedTask.from}）超时未交付RESULT，已自动发送ERROR关闭链路`
+        elapsed_min: Math.round(elapsedMin),
+        timeout_min: MY_ACKED_TIMEOUT_MIN,
+        message: `❌ 任务 ${ackedTask.task_id}（来自${ackedTask.from}）${Math.round(elapsedMin)}分钟未交付RESULT，已自动发送ERROR关闭链路`
       });
       
       // 自动发送ERROR RESULT
@@ -1501,7 +1474,7 @@ async function cmdPoll(args) {
         priority: 'NORMAL',
         body: {
           status: 'timeout',
-          message: `${appConfig.identity.id} 在${MAX_MY_ACKED_REMINDS}次轮询内未交付RESULT，任务自动关闭`,
+          message: `${appConfig.identity.id} 在${MY_ACKED_TIMEOUT_MIN}分钟内未交付RESULT，任务自动关闭`,
           original_task_id: ackedTask.task_id,
           action: ackedTask.action,
           auto_generated: true
@@ -1519,20 +1492,8 @@ async function cmdPoll(args) {
       }
       
       myAckedToRemove.push(ackedTask.task_id);
-    } else {
-      // 还没到3次，发送递进提醒
-      const urgencyLevel = remindCount === 1 ? '📋' : '⚠️';
-      const urgencyText = remindCount === 1 ? '请执行后发送RESULT' : '⚠️ 任务仍未交付RESULT，请尽快执行';
-      pollNotifications.push({
-        type: 'MY_ACKED_REMIND',
-        task_id: ackedTask.task_id,
-        from: ackedTask.from,
-        action: ackedTask.action,
-        remind_count: remindCount,
-        max_reminds: MAX_MY_ACKED_REMINDS,
-        message: `${urgencyLevel} 任务 ${ackedTask.action || ackedTask.task_id}（来自${ackedTask.from}）${urgencyText}（${remindCount}/${MAX_MY_ACKED_REMINDS}次提醒，超时将自动关闭）`
-      });
     }
+    // 未超时不发提醒，用status命令查看
   }
   
   // 批量移除已超时的my_acked_tasks
@@ -1540,9 +1501,9 @@ async function cmdPoll(args) {
     cfg.removeMyAckedTask(taskId);
   }
   
-  // ── 检查my_pending_discuss_replies：强制讨论回复机制 ──
-  // 我需要回复讨论但还没回复 → 递进提醒 → 超时标记
-  const MAX_DISCUSS_REMINDS = 3;  // 3次轮询未回复 → 标记轮次超时
+  // ── 检查my_pending_discuss_replies：时间判定 ──
+  // 我需要回复讨论但还没回复 → 检查时间 → 超时标记
+  const DISCUSS_TIMEOUT_MIN = appConfig.polling.discuss_timeout_min || 120;  // 默认120分钟
   const myPendingDiscuss = cfg.getMyPendingDiscussReplies();
   const discussToRemove = [];
   
@@ -1573,9 +1534,9 @@ async function cmdPoll(args) {
       }
     }
     
-    const remindCount = cfg.incrementMyDiscussRemindCount(pending.thread_id, pending.round);
+    const elapsedMin = (Date.now() - new Date(pending.created_at).getTime()) / 60000;
     
-    if (remindCount >= MAX_DISCUSS_REMINDS) {
+    if (elapsedMin >= DISCUSS_TIMEOUT_MIN) {
       if (isInitiator) {
         // ── 发起方超时未总结 ──
         // 活跃线程检查中有独立的pending_summary超时机制会自动推进轮次
@@ -1585,7 +1546,9 @@ async function cmdPoll(args) {
           thread_id: pending.thread_id,
           round: pending.round,
           topic: pending.topic,
-          message: `❌ 讨论[${pending.topic}]第${pending.round}轮你超时未总结，系统将自动推进轮次`
+          elapsed_min: Math.round(elapsedMin),
+          timeout_min: DISCUSS_TIMEOUT_MIN,
+          message: `❌ 讨论[${pending.topic}]第${pending.round}轮你${Math.round(elapsedMin)}分钟未总结，系统将自动推进轮次`
         });
         discussToRemove.push({ thread_id: pending.thread_id, round: pending.round });
       } else {
@@ -1595,7 +1558,9 @@ async function cmdPoll(args) {
           thread_id: pending.thread_id,
           round: pending.round,
           topic: pending.topic,
-          message: `❌ 讨论[${pending.topic}]第${pending.round}轮你超时未回复，已标记轮次超时`
+          elapsed_min: Math.round(elapsedMin),
+          timeout_min: DISCUSS_TIMEOUT_MIN,
+          message: `❌ 讨论[${pending.topic}]第${pending.round}轮你${Math.round(elapsedMin)}分钟未回复，已标记轮次超时`
         });
         
         // 通知发起方该参与者本轮超时
@@ -1611,7 +1576,7 @@ async function cmdPoll(args) {
             round: pending.round, 
             thread_id: pending.thread_id, 
             participant: appConfig.identity.id,
-            message: `${appConfig.identity.id} 在${MAX_DISCUSS_REMINDS}次轮询内未回复讨论，轮次超时`
+            message: `${appConfig.identity.id} 在${DISCUSS_TIMEOUT_MIN}分钟内未回复讨论，轮次超时`
           },
           senderRole: myRole,
           sharedSecret: appConfig.security.shared_secret,
@@ -1621,23 +1586,8 @@ async function cmdPoll(args) {
         
         discussToRemove.push({ thread_id: pending.thread_id, round: pending.round });
       }
-    } else {
-      // 还没到3次，发送递进提醒
-      const thread = cfg.getThread(pending.thread_id);
-      const isInitiator = thread && thread.initiator === myId;
-      const actionText = isInitiator ? '请总结并推进' : '请回复讨论';
-      const urgencyLevel = remindCount === 1 ? '📋' : '⚠️';
-      const urgencyText = remindCount === 1 ? actionText : `⚠️ ${isInitiator ? '仍未总结' : '讨论仍未回复'}，请尽快${isInitiator ? '总结' : '参与'}`;
-      pollNotifications.push({
-        type: isInitiator ? 'MY_DISCUSS_SUMMARY_REMIND' : 'MY_DISCUSS_REMIND',
-        thread_id: pending.thread_id,
-        round: pending.round,
-        topic: pending.topic,
-        remind_count: remindCount,
-        max_reminds: MAX_DISCUSS_REMINDS,
-        message: `${urgencyLevel} 讨论[${pending.topic}]第${pending.round}轮 ${urgencyText}（${remindCount}/${MAX_DISCUSS_REMINDS}次提醒，超时将${isInitiator ? '自动推进' : '标记轮次超时'}）`
-      });
     }
+    // 未超时不发提醒，用status命令查看
   }
   
   // 批量移除已超时/已结束的my_pending_discuss_replies
@@ -2038,11 +1988,13 @@ async function cmdPoll(args) {
   
   // 精简版pending概要
   const fullState = cfg.getState();
+  const ackTimeoutMin = appConfig.polling.ack_timeout_min || 60;
+  const resultTimeoutMin = appConfig.polling.result_timeout_min || 120;
   const ackSummary = fullState.pending_acks.length > 0
-    ? { count: fullState.pending_acks.length, waiting_for: [...new Set(fullState.pending_acks.map(p => p.to))], details: fullState.pending_acks.map(p => ({ task_id: p.task_id, to: p.to, no_ack_count: p.no_ack_count })) }
+    ? { count: fullState.pending_acks.length, waiting_for: [...new Set(fullState.pending_acks.map(p => p.to))], details: fullState.pending_acks.map(p => ({ task_id: p.task_id, to: p.to, elapsed_min: Math.round((Date.now() - new Date(p.sent_at).getTime()) / 60000), timeout_min: ackTimeoutMin })) }
     : { count: 0 };
   const resultSummary = (fullState.pending_results || []).length > 0
-    ? { count: fullState.pending_results.length, waiting_for: [...new Set(fullState.pending_results.map(p => p.to))], details: fullState.pending_results.map(p => ({ task_id: p.task_id, to: p.to, no_result_count: p.no_result_count })) }
+    ? { count: fullState.pending_results.length, waiting_for: [...new Set(fullState.pending_results.map(p => p.to))], details: fullState.pending_results.map(p => ({ task_id: p.task_id, to: p.to, elapsed_min: Math.round((Date.now() - new Date(p.ack_at).getTime()) / 60000), timeout_min: resultTimeoutMin })) }
     : { count: 0 };
   
   // 讨论概要
@@ -2074,14 +2026,15 @@ async function cmdPoll(args) {
   const myAckedSummary = (() => {
     const tasks = cfg.getMyAckedTasks();
     if (tasks.length === 0) return { count: 0 };
+    const timeoutMin = appConfig.polling.result_timeout_min || 120;
     return {
       count: tasks.length,
       tasks: tasks.map(t => ({
         task_id: t.task_id,
         from: t.from,
         action: t.action,
-        remind_count: t.no_result_remind_count || 0,
-        max_reminds: 3
+        elapsed_min: Math.round((Date.now() - new Date(t.acked_at || t.ack_at).getTime()) / 60000),
+        timeout_min: timeoutMin
       }))
     };
   })();
@@ -2090,6 +2043,7 @@ async function cmdPoll(args) {
   const myDiscussPendingSummary = (() => {
     const items = cfg.getMyPendingDiscussReplies();
     if (items.length === 0) return { count: 0 };
+    const timeoutMin = appConfig.polling.discuss_timeout_min || 120;
     return {
       count: items.length,
       items: items.map(d => ({
@@ -2097,8 +2051,8 @@ async function cmdPoll(args) {
         round: d.round,
         topic: d.topic,
         from: d.from,
-        remind_count: d.remind_count || 0,
-        max_reminds: 3
+        elapsed_min: Math.round((Date.now() - new Date(d.created_at).getTime()) / 60000),
+        timeout_min: timeoutMin
       }))
     };
   })();
@@ -2310,7 +2264,7 @@ async function cmdStatus(args) {
     println(`  📤 等待ACK (${state.pending_acks.length}):`);
     for (const p of state.pending_acks) {
       const elapsed = Math.round((Date.now() - new Date(p.sent_at).getTime()) / 60000);
-      println(`     → ${p.to} | ${p.task_id} | 已等待${elapsed}分钟 | 轮询${p.no_ack_count || 0}/3次`);
+      println(`     → ${p.to} | ${p.task_id} | 已等待${elapsed}分钟 | 超时${appConfig.polling.ack_timeout_min || 60}分钟`);
     }
   } else {
     println('  📤 等待ACK: 无');
@@ -2324,7 +2278,7 @@ async function cmdStatus(args) {
     println(`  🔄 等待RESULT (${pendingResults.length}):`);
     for (const p of pendingResults) {
       const elapsed = Math.round((Date.now() - new Date(p.ack_at).getTime()) / 60000);
-      println(`     → ${p.to} | ${p.task_id} | 已等待${elapsed}分钟 | 轮询${p.no_result_count || 0}/3次`);
+      println(`     → ${p.to} | ${p.task_id} | 已等待${elapsed}分钟 | 超时${appConfig.polling.result_timeout_min || 120}分钟`);
     }
   } else {
     println('  🔄 等待RESULT: 无');
@@ -2337,8 +2291,8 @@ async function cmdStatus(args) {
   if (myAckedTasks.length > 0) {
     println(`  📝 待交付RESULT (${myAckedTasks.length}):`);
     for (const t of myAckedTasks) {
-      const elapsed = Math.round((Date.now() - new Date(t.ack_at).getTime()) / 60000);
-      println(`     ← 来自${t.from} | ${t.action || t.task_id} | 已等${elapsed}分钟 | 提醒${t.no_result_remind_count || 0}/3次`);
+      const elapsed = Math.round((Date.now() - new Date(t.acked_at || t.ack_at).getTime()) / 60000);
+      println(`     ← 来自${t.from} | ${t.action || t.task_id} | 已等${elapsed}分钟 | 超时${appConfig.polling.result_timeout_min || 120}分钟`);
     }
   } else {
     println('  📝 待交付RESULT: 无');
@@ -2352,7 +2306,8 @@ async function cmdStatus(args) {
     println(`  💬 待回复讨论 (${myDiscussPending.length}):`);
     for (const d of myDiscussPending) {
       const elapsed = Math.round((Date.now() - new Date(d.created_at).getTime()) / 60000);
-      println(`     ← [${d.topic}] 第${d.round}轮 | 来自${d.from} | 已等${elapsed}分钟 | 提醒${d.remind_count || 0}/3次`);
+      const discussTimeoutMin = appConfig.polling.discuss_timeout_min || 120;
+      println(`     ← [${d.topic}] 第${d.round}轮 | 来自${d.from} | 已等${elapsed}分钟 | 超时${discussTimeoutMin}分钟`);
     }
   } else {
     println('  💬 待回复讨论: 无');
