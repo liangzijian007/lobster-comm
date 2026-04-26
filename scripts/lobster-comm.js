@@ -280,7 +280,9 @@ async function cmdSetup(args) {
       polling: {
         interval_min: intervalMin,
         task_timeout_min: taskTimeout,
-        ack_timeout_min: intervalMin * 3
+        ack_timeout_min: intervalMin * 3,
+        result_timeout_min: Math.max(intervalMin * 12, 120),  // 至少120分钟，轮询间隔大的龙虾自动加长
+        discuss_timeout_min: Math.max(intervalMin * 12, 120)  // 至少120分钟，轮询间隔大的龙虾自动加长
       },
       interaction: {
         max_auto_reply_rounds: maxReply,
@@ -508,7 +510,9 @@ async function cmdSetup(args) {
     polling: {
       interval_min: intervalMin,
       task_timeout_min: taskTimeout,
-      ack_timeout_min: intervalMin * 3
+      ack_timeout_min: intervalMin * 3,
+      result_timeout_min: Math.max(intervalMin * 12, 120),
+      discuss_timeout_min: Math.max(intervalMin * 12, 120)
     },
     interaction: {
       max_auto_reply_rounds: maxReply,
