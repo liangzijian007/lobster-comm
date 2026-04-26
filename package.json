@@ -1,0 +1,31 @@
+{
+  "name": "lobster-comm",
+  "version": "1.0.0",
+  "description": "LobsterMail - OpenClaw跨平台通信协议，基于163共享邮箱实现龙虾间指令调度",
+  "main": "scripts/lobster-comm.js",
+  "scripts": {
+    "setup": "node scripts/lobster-comm.js setup",
+    "send": "node scripts/lobster-comm.js send",
+    "poll": "node scripts/lobster-comm.js poll",
+    "status": "node scripts/lobster-comm.js status",
+    "cleanup": "node scripts/lobster-comm.js cleanup",
+    "test-conn": "node scripts/lobster-comm.js test-conn"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "imapflow": "^1.0.186",
+    "mailparser": "^3.9.3",
+    "nodemailer": "^7.0.13"
+  },
+  "keywords": [
+    "lobster",
+    "openclaw",
+    "imap",
+    "smtp",
+    "163.com",
+    "跨平台通信",
+    "龙虾"
+  ],
+  "author": "LobsterComm Team",
+  "license": "MIT"
+}
