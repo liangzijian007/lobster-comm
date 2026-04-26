@@ -1313,7 +1313,7 @@ async function cmdPoll(args) {
         // (CLIXML防御：debug日志写文件，不写stderr)
       } else {
         // 正式CMD：通知Agent需要执行并发RESULT
-        // 必须回复RESULT：收到CMD后不回复会导致任务中断，这是强制性要求
+        // 执行完毕后必须回复RESULT/ERROR：这是执行结果反馈，不是ACK确认（ACK已自动发）
         const cmdContent = cmdMsg.body ? (cmdMsg.body.content || cmdMsg.body.description || '') : '';
         pollNotifications.push({
           type: 'AUTO_ACK_SENT',
@@ -1321,10 +1321,10 @@ async function cmdPoll(args) {
           from: cmdMsg.from,
           action: cmdMsg.body ? cmdMsg.body.action : '',
           content: cmdContent || undefined,
-          must_reply: true,  // 强制要求：必须回复RESULT或ERROR
+          must_reply: true,  // 执行完毕后必须回复RESULT或ERROR（ACK是执行前确认已自动发，RESULT是执行后反馈必须手动发）
           action_required: true,
           action_type: 'reply_result',
-          message: `📤 已自动ACK ${cmdMsg.from} 的指令 (${cmdMsg.body ? cmdMsg.body.action : cmdMsg.task_id})，必须回复RESULT${cmdContent ? '\n任务内容: ' + cmdContent : ''}`
+          message: `📤 已自动ACK ${cmdMsg.from} 的指令 (${cmdMsg.body ? cmdMsg.body.action : cmdMsg.task_id})，执行完毕后必须回复RESULT或ERROR${cmdContent ? '\n任务内容: ' + cmdContent : ''}`
         });
       }
     }
@@ -1904,8 +1904,8 @@ async function cmdPoll(args) {
     // DISCUSS发给自己且当前轮次waiting包含自己 → 需要回复讨论
     if (m.type === 'CMD' && m.to === myId) {
       slim.action_required = true;
-      slim.action_type = 'reply_result';  // 改名：不是reply_ack_and_execute（ACK已自动发），是必须回复RESULT
-      slim.must_reply = true;  // 强制标记：必须回复RESULT或ERROR，不回复会卡死任务
+      slim.action_type = 'reply_result';  // ACK是执行前确认（已自动发），RESULT是执行后反馈（Agent必须发）
+      slim.must_reply = true;  // 执行完毕后必须回复RESULT/ERROR，不回复会导致任务卡死
       // 确保content/description展示在body中，方便Agent看到任务详情
       if (slim.body && !slim.body.content && !slim.body.description) {
         slim.body._note = 'body中无content/description，请告知中枢需要更多信息';

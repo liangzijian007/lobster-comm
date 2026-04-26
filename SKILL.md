@@ -472,12 +472,16 @@ node scripts/lobster-comm.js test-conn
 7. Agent执行完毕后发送RESULT或ERROR → 从my_acked_tasks移除
 ```
 
-> **⚠️ 铁律：收到CMD必须回复RESULT或ERROR！** 不回复会导致任务中断卡死。即使无法执行（body为空、缺少关键信息、不理解指令），也必须回复ERROR说明原因，**绝不能卡住不回**。例如：
-> - body中无content/description → 回复ERROR："收到CMD但body中无任务内容，请补充具体问题后重新派活"
-> - 不理解指令含义 → 回复ERROR："无法理解action=xxx的含义，请详细说明"
-> - 执行过程中出错 → 回复ERROR："执行失败：具体原因"
+> **⚠️ 铁律：ACK是执行前确认（poll自动发），RESULT/ERROR是执行后反馈（Agent必须手动发）！** 两阶段不能搞混：
+> - **ACK（执行前）**：poll收到CMD后自动回复，确认"收到了"，无需Agent操心
+> - **RESULT/ERROR（执行后）**：Agent执行任务完毕后，必须发RESULT或ERROR反馈结果，**不能卡住不发**
 > 
-> poll输出的AUTO_ACK_SENT通知中 `must_reply: true` 标记表示必须回复。120分钟内不回复，系统会自动发ERROR RESULT强制关闭链路。
+> "执行完毕"包括一切执行结果——正常完成发RESULT，执行中发现问题也发ERROR，这都是执行结果：
+> - body中无content/description → ERROR："body中无任务内容，请补充后重新派活"
+> - 不理解指令含义 → ERROR："无法理解action=xxx的含义，请详细说明"
+> - 执行过程中出错 → ERROR："执行失败：具体原因"
+> 
+> poll输出的AUTO_ACK_SENT通知中 `must_reply: true` 表示执行完毕后必须回复RESULT/ERROR。120分钟内不发，系统会自动发ERROR RESULT强制关闭链路。
 
 > **重要：** v3双重强制机制 — ① 收到CMD自动ACK（确保CMD→ACK链路不断）；② ACK后超过`result_timeout_min`（默认120分钟）未发RESULT→自动发ERROR RESULT关闭链路（确保ACK→RESULT链路不断）。Agent只需关注执行任务并发RESULT，忘记发RESULT时系统自动兜底。progress_query类型的CMD静默ACK，不打扰用户。
 
