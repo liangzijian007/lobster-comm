@@ -15,7 +15,7 @@ metadata:
 
 基于 **163共享邮箱** 的龙虾（OpenClaw）跨平台通信协议。通过邮件实现龙虾间指令调度、ACK确认、结果回传、任务过期通知。
 
-**v3核心变更：超时判定与轮询间隔解耦。** 旧版用轮询计数制（3次poll无响应→超时），但不同龙虾轮询间隔不同（10分钟vs 1小时），导致超时时间不稳定。新版改为**时间判定为主**：`ack_timeout_min`（默认60分钟）无ACK→EXPIRED；`result_timeout_min`（默认120分钟）无RESULT→自动发ERROR关闭链路；`discuss_timeout_min`（默认120分钟）未回复→轮次超时。**CMD→强制ACK（auto-ACK），ACK→强制RESULT（超时自动发ERROR关闭链路），DISCUSS→强制回复（超时标记轮次超时）。** **发起方=主持人：不参与辩论，每轮总结后推进轮次；参与方=回复者：按角色回应议题。**
+**v3核心变更：超时判定与轮询间隔解耦。** 旧版用轮询计数制（3次poll无响应→超时），但不同龙虾轮询间隔不同（10分钟vs 1小时），导致超时时间不稳定。新版改为**时间判定为主**：`ack_timeout_min`/`result_timeout_min`/`discuss_timeout_min`（均默认120分钟）。**⚠️ 超时判定权在中枢龙虾——只有中枢的超时设定生效，交互/被动虾的超时设定无实际作用。** 如有worker轮询间隔≥60分钟（如WorkBuddy），建议中枢将超时设为≥180分钟。**CMD→强制ACK（auto-ACK），ACK→强制RESULT（超时自动发ERROR关闭链路），DISCUSS→强制回复（超时标记轮次超时）。** **发起方=主持人：不参与辩论，每轮总结后推进轮次；参与方=回复者：按角色回应议题。**
 
 ---
 
@@ -59,9 +59,14 @@ node scripts/lobster-comm.js setup
 | | ⑦ | 信任龙虾ID | ✅ | 允许指令的龙虾，逗号分隔，*=全部 | 龙一,龙二 |
 | 4.轮询配置 | ⑧ | 轮询间隔 | ✅ | 分钟，<5会警告163限频 | 10 |
 | | ⑨ | 任务超时 | 默认30 | 分钟 | 30 |
-| 5.高级配置 | ⑩ | 自动互回复轮次 | 默认0 | 0=永不自动回复 | 0 |
-| | ⑪ | 已处理邮件保留 | 默认24 | 小时 | 24 |
-| | ⑫ | 异常邮件保留 | 默认168 | 小时=7天 | 168 |
+| 5.超时设定 | ⑩ | ACK超时 | 默认120 | 分钟，仅中枢生效 | 120 |
+| | ⑪ | RESULT超时 | 默认120 | 分钟，仅中枢生效 | 120 |
+| | ⑫ | 讨论超时 | 默认120 | 分钟，仅中枢生效 | 120 |
+| 6.高级配置 | ⑬ | 自动互回复轮次 | 默认0 | 0=永不自动回复 | 0 |
+| | ⑭ | 已处理邮件保留 | 默认24 | 小时 | 24 |
+| | ⑮ | 异常邮件保留 | 默认168 | 小时=7天 | 168 |
+
+> **⚠️ 超时设定关键说明：** 超时判定权在中枢龙虾。交互虾/被动虾的超时设定无实际作用（超时是中枢在判定，不是自己判自己）。中枢设定超时时，应以**最慢worker的轮询间隔**为基准——如有worker轮询≥60分钟（如WorkBuddy），建议超时≥180分钟。
 
 **方式二：非交互式（Agent远程配置，推荐）**
 
@@ -90,13 +95,16 @@ node scripts/lobster-comm.js setup --json-file /path/to/setup-config.json
 | trust_ids | ✅ | 信任龙虾ID，逗号分隔，*=全部 | - |
 | interval_min | ✅ | 轮询间隔（分钟） | - |
 | task_timeout_min | | 任务超时（分钟） | 30 |
+| ack_timeout_min | | ACK超时（分钟），仅中枢生效 | 120 |
+| result_timeout_min | | RESULT超时（分钟），仅中枢生效 | 120 |
+| discuss_timeout_min | | 讨论超时（分钟），仅中枢生效 | 120 |
 | max_auto_reply_rounds | | 最大自动互回复轮次 | 0 |
 | done_retention_hours | | 已处理邮件保留（小时） | 24 |
 | error_retention_hours | | 异常邮件保留（小时） | 168 |
 
 > **⚠️ PowerShell注意**：`--json` 直接传含中文的JSON字符串会被PowerShell编码损坏，**强烈建议用 `--json-file` 方式**：Agent先将配置写入临时JSON文件，再用 `--json-file` 传入。
 
-**注：v3超时判定与轮询间隔解耦，ack_timeout_min/result_timeout_min/discuss_timeout_min独立配置，默认60/120/120分钟。**
+**注：v3超时判定与轮询间隔解耦，ack_timeout_min/result_timeout_min/discuss_timeout_min独立配置，均默认120分钟。超时判定权在中枢龙虾，交互/被动虾的超时设定无实际作用。**
 
 配置保存后，会自动测试IMAP/SMTP连接并发送HELLO宣告存在。
 
@@ -427,7 +435,7 @@ node scripts/lobster-comm.js test-conn
 发CMD → 等待ACK
 │
 ├─ 每5分钟轮询：无ACK → 继续等待（用status命令查看进度）
-├─ ack_timeout_min（默认60分钟）后仍无ACK → 发EXPIRED → 判定离线 → 指令作废
+├─ ack_timeout_min（默认120分钟）后仍无ACK → 发EXPIRED → 判定离线 → 指令作废
 │
 └─ 收到ACK → pending_ack移到pending_result → 通知用户"已确认接收"
 ```
@@ -549,7 +557,7 @@ node scripts/lobster-comm.js test-conn
 
 | 优化项 | 说明 | 收益 |
 |--------|------|------|
-| 时间判定超时 | ack_timeout_min/result_timeout_min/discuss_timeout_min独立配置，与轮询间隔解耦 | 不同轮询频率的龙虾超时行为一致 |
+| 时间判定超时 | ack_timeout_min/result_timeout_min/discuss_timeout_min独立配置（均默认120分钟），与轮询间隔解耦。超时判定权在中枢龙虾 | 不同轮询频率的龙虾超时行为一致 |
 | 精简通知 | 删掉ACK_WAITING/MY_ACKED_REMIND/RESULT_WAITING等中间状态通知 | poll输出更干净，省token |
 | CMD自动ACK | poll收到CMD自动回复ACK，不依赖Agent自觉 | 通信链路不因Agent不ACK而断裂 |
 | 强制RESULT | ACK后超过result_timeout_min（默认120分钟）未发RESULT→自动发ERROR RESULT关闭链路 | 通信链路不因Agent不发RESULT而断裂 |
@@ -621,7 +629,7 @@ node scripts/lobster-comm.js test-conn
 | 提示"不能发指令给自己" | to和from不能相同，检查命令参数 |
 | 收到EXPIRED通知后原CMD仍执行 | EXPIRED将原task_id加入黑名单，下次poll时CMD会被跳过 |
 | INBOX中[LOBSTER]邮件积压 | v2自动移出CMD到LOBSTER_DONE，如仍有积压检查poll是否正常运行 |
-| 3次轮询后指令作废 | v3时间判定：ack_timeout_min（默认60分钟）无ACK则判定离线。超时时间可在config中调整，与轮询间隔无关 |
+| 3次轮询后指令作废 | v3时间判定：ack_timeout_min（默认120分钟）无ACK则判定离线。超时时间可在config中调整，与轮询间隔无关。超时判定权在中枢，交互/被动虾的超时设定无实际作用 |
 | 新龙虾部署后不被发现 | setup自动发HELLO，也可手动运行hello命令重新宣告 |
 | send --type ACK --reply-to仍提示必须指定 | v3已修复：reply-to自动复用为task-id，无需再传--task-id |
 | 同task_id的ACK和RESULT只收到一个 | v3已修复：processed_task_ids改为`task_id::type`组合去重，ACK和RESULT不再互斥 |

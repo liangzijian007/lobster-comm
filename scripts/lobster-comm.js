@@ -236,8 +236,14 @@ async function cmdSetup(args) {
         shared_secret: 'auto',
         trust_ids: '*',
         interval_min: 10,
-        task_timeout_min: 30
+        task_timeout_min: 30,
+        ack_timeout_min: 120,
+        result_timeout_min: 120,
+        discuss_timeout_min: 120
       }, null, 2));
+      println('');
+      println('⏱️ 超时说明：仅中枢龙虾的超时设定生效（超时判定权在中枢）。');
+      println('   如有worker轮询间隔≥60分钟（如WorkBuddy），建议超时≥180分钟。');
       process.exit(1);
     }
     
@@ -280,9 +286,9 @@ async function cmdSetup(args) {
       polling: {
         interval_min: intervalMin,
         task_timeout_min: taskTimeout,
-        ack_timeout_min: intervalMin * 3,
-        result_timeout_min: Math.max(intervalMin * 12, 120),  // 至少120分钟，轮询间隔大的龙虾自动加长
-        discuss_timeout_min: Math.max(intervalMin * 12, 120)  // 至少120分钟，轮询间隔大的龙虾自动加长
+        ack_timeout_min: parseInt(setupJson.ack_timeout_min) || 120,
+        result_timeout_min: parseInt(setupJson.result_timeout_min) || 120,
+        discuss_timeout_min: parseInt(setupJson.discuss_timeout_min) || 120
       },
       interaction: {
         max_auto_reply_rounds: maxReply,
@@ -510,9 +516,9 @@ async function cmdSetup(args) {
     polling: {
       interval_min: intervalMin,
       task_timeout_min: taskTimeout,
-      ack_timeout_min: intervalMin * 3,
-      result_timeout_min: Math.max(intervalMin * 12, 120),
-      discuss_timeout_min: Math.max(intervalMin * 12, 120)
+      ack_timeout_min: parseInt(setupJson.ack_timeout_min) || 120,
+      result_timeout_min: parseInt(setupJson.result_timeout_min) || 120,
+      discuss_timeout_min: parseInt(setupJson.discuss_timeout_min) || 120
     },
     interaction: {
       max_auto_reply_rounds: maxReply,
