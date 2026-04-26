@@ -1324,7 +1324,9 @@ async function cmdPoll(args) {
           must_reply: true,  // 执行完毕后必须回复RESULT或ERROR（ACK是执行前确认已自动发，RESULT是执行后反馈必须手动发）
           action_required: true,
           action_type: 'reply_result',
-          message: `📤 已自动ACK ${cmdMsg.from} 的指令 (${cmdMsg.body ? cmdMsg.body.action : cmdMsg.task_id})，执行完毕后必须回复RESULT或ERROR${cmdContent ? '\n任务内容: ' + cmdContent : ''}`
+          protocol_rule: 'STRICT_MUST_REPLY',
+          violation: '不回复RESULT/ERROR = 协议违规，会导致任务链路卡死中断',
+          message: `📤 已自动ACK ${cmdMsg.from} 的指令 (${cmdMsg.body ? cmdMsg.body.action : cmdMsg.task_id})。⚠️严禁不回复！执行完毕后必须回复RESULT或ERROR，不回复会导致任务链路中断。即使无法执行（body为空/不理解指令）也必须回ERROR说明原因。${cmdContent ? '\n任务内容: ' + cmdContent : ''}`
         });
       }
     }
@@ -1906,9 +1908,11 @@ async function cmdPoll(args) {
       slim.action_required = true;
       slim.action_type = 'reply_result';  // ACK是执行前确认（已自动发），RESULT是执行后反馈（Agent必须发）
       slim.must_reply = true;  // 执行完毕后必须回复RESULT/ERROR，不回复会导致任务卡死
+      slim.protocol_rule = 'STRICT_MUST_REPLY';  // 严禁不回复
+      slim.protocol_warning = '严禁不回复RESULT/ERROR！执行完毕后必须回复，即使无法执行也必须回ERROR说明原因。不回复=协议违规，会导致任务链路中断。';
       // 确保content/description展示在body中，方便Agent看到任务详情
       if (slim.body && !slim.body.content && !slim.body.description) {
-        slim.body._note = 'body中无content/description，请告知中枢需要更多信息';
+        slim.body._note = '⚠️ body中无content/description → 这是执行结果，必须回ERROR说明缺少任务内容，严禁不回复';
       }
     } else if (m.type === 'DISCUSS' && m.to === myId && m.thread_id) {
       let thread = (cfg.getActiveThreads() || {})[m.thread_id];
