@@ -141,11 +141,14 @@ node scripts/lobster-comm.js send \
 | --type | 是 | 邮件类型：CMD/ACK/RESULT/ERROR/EXPIRED/HELLO/GOODBYE/DISCUSS/CONCLUDE |
 | --to | 是 | 目标龙虾ID（不能与自己相同） |
 | --action | CMD必填 | 动作标识 |
-| --params | 否 | 动作参数，JSON字符串 |
-| --description | 否 | 人类可读的任务描述 |
+| --content | 推荐 | 任务详细说明（支持`\n`转义换行，多行用`--content-file`） |
+| --params | 否 | 结构化参数，JSON字符串 |
+| --description | 否 | 简短任务描述（人类可读） |
 | --timeout | 否 | 超时分钟数，默认使用配置值 |
 | --priority | 否 | HIGH/NORMAL/LOW，默认NORMAL |
 | --reply-to | 否 | 回复的原任务ID（ACK/RESULT/ERROR时自动复用为task-id，无需再传--task-id） |
+
+> **⚠️ CMD内容传递优先级：** `--content` 传详细任务说明（推荐），`--description` 传简短描述，`--params` 传结构化参数。三者可同时使用。**龙大反馈：之前CMD类型未处理`--content`参数，v3已修复，所有类型都支持`--content`。**
 
 ### 2. 回复ACK（确认收到指令）
 
@@ -306,8 +309,9 @@ node scripts/lobster-comm.js poll --action-only
       "to": "B002",
       "task_id": "A001_20260425140000_f3a2",
       "action_required": true,
-      "action_type": "reply_ack_and_execute",
-      "body": {"action": "execute_skill"}
+      "action_type": "reply_result",
+      "must_reply": true,
+      "body": {"action": "execute_skill", "content": "执行auto-invoice技能，处理XQ202604003任务"}
     }
   ],
   "discuss_actions": {
@@ -341,7 +345,8 @@ node scripts/lobster-comm.js poll --action-only
       "priority": "HIGH",
       "body": {"action": "execute_skill", "params": {"skill_name": "auto-invoice"}},
       "action_required": true,
-      "action_type": "reply_ack_and_execute",
+      "action_type": "reply_result",
+      "must_reply": true,
       "timeout_min": 30
     }
   ],
@@ -464,8 +469,15 @@ node scripts/lobster-comm.js test-conn
 4. 自动回复ACK（poll内置，不依赖Agent手动调用send）
 5. 记录到my_acked_tasks（跟踪"我ACK了但还没发RESULT"的任务）
 6. 通知Agent执行任务
-7. Agent执行完毕后手动发送RESULT或ERROR → 从my_acked_tasks移除
+7. Agent执行完毕后发送RESULT或ERROR → 从my_acked_tasks移除
 ```
+
+> **⚠️ 铁律：收到CMD必须回复RESULT或ERROR！** 不回复会导致任务中断卡死。即使无法执行（body为空、缺少关键信息、不理解指令），也必须回复ERROR说明原因，**绝不能卡住不回**。例如：
+> - body中无content/description → 回复ERROR："收到CMD但body中无任务内容，请补充具体问题后重新派活"
+> - 不理解指令含义 → 回复ERROR："无法理解action=xxx的含义，请详细说明"
+> - 执行过程中出错 → 回复ERROR："执行失败：具体原因"
+> 
+> poll输出的AUTO_ACK_SENT通知中 `must_reply: true` 标记表示必须回复。120分钟内不回复，系统会自动发ERROR RESULT强制关闭链路。
 
 > **重要：** v3双重强制机制 — ① 收到CMD自动ACK（确保CMD→ACK链路不断）；② ACK后超过`result_timeout_min`（默认120分钟）未发RESULT→自动发ERROR RESULT关闭链路（确保ACK→RESULT链路不断）。Agent只需关注执行任务并发RESULT，忘记发RESULT时系统自动兜底。progress_query类型的CMD静默ACK，不打扰用户。
 
@@ -611,6 +623,8 @@ node scripts/lobster-comm.js test-conn
 | params解析后变成{raw:"..."} | v3已修复：send端params统一JSON.parse后再放入body；接收端防护性解析字符串params |
 | poll信息太多Agent容易漏 | 使用`poll --action-only`只输出需要本龙虾行动的事项；标准输出中action_required=true标记需要行动的消息 |
 | 收到CMD不ACK导致通信链路断裂 | v3已修复：poll自动ACK，收到CMD即确认，不依赖Agent手动调用send。Agent只需执行任务并发RESULT |
+| 收到CMD但body为空/缺少关键信息 | 必须回复ERROR说明缺少什么，不能卡住不回。如：`send --type ERROR --to 发送方 --reply-to 任务ID --content "收到CMD但无任务内容，请补充后重新派活"` |
+| CMD的--content参数没传到body | v3已修复：所有类型都支持`--content`参数，CMD类型`--content`会写入body.content字段 |
 | ACK后不发RESULT导致链路断裂 | v3已修复：ACK后超过result_timeout_min（默认120分钟）未发RESULT→自动发ERROR RESULT关闭链路（my_acked_tasks跟踪）。超时时间可在config中调整 |
 | Agent靠content文字猜讨论状态导致误判 | v3已修复：DISCUSS消息body注入max_rounds/waiting_for_me/discuss_status/must_reply结构化字段；发起方content前加`[第X轮/共Y轮 | 📝请总结并推进下一轮]`，参与方content前加`[第X轮/共Y轮 | ⚡必须回复/⏳已回复等待他人]`系统前缀。Agent应优先看结构化字段，不靠content猜状态 |
 | Agent收到讨论不回复导致讨论卡死 | v3已修复：参与方超过discuss_timeout_min（默认120分钟）未回复→标记轮次超时（PARTICIPANT_ROUND_TIMEOUT通知发起方）；发起方超时未总结→自动推进轮次。讨论不会因任何一方不行动而卡死 |

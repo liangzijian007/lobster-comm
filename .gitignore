@@ -1,20 +1,13 @@
 # Dependencies
 node_modules/
 
-# Runtime config & state (contains credentials - NEVER commit)
-# These live in ~/.config/lobster-comm/ outside the repo
-config.json
-state.json
-debug.log
+# Local config & state (contains credentials and runtime state)
+.workbuddy/
+.codebuddy/
 
-# OS files
-.DS_Store
-Thumbs.db
+# Logs
+*.log
 
-# IDE
-.vscode/
-.idea/
-
-# Temp files
-*.tmp
-*.bak
+# Test artifacts (contains personal lobster IDs and test data)
+test-report-v2.md
+scripts/test-v2.js
